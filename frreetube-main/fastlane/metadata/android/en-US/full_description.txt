@@ -1,0 +1,10 @@
+Bebas nonton video youtube tanpa iklan.
+
+<b>Features:</b>
+
+* Beautiful user interface
+* Lightweight and fast
+* No Login Required
+* Keep your liked videos and comments
+* Playlists support
+* Download videos, audios and thumbnails
