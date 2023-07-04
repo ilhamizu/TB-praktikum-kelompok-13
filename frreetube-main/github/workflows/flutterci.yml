@@ -1,0 +1,175 @@
+name: FlutterCI
+
+on:
+  push:
+    branches:
+      - main
+      - next
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+  workflow_dispatch:
+  release:
+    types:
+      - created
+      - edited
+
+jobs:
+  build-android:
+    name: Android
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Setup java
+        uses: actions/setup-java@v1
+        with:
+          java-version: "12.x"
+
+      - name: Setup flutter
+        uses: subosito/flutter-action@master
+        with:
+          channel: stable
+
+      - name: Generate android keystore
+        id: android_keystore
+        uses: timheuer/base64-to-file@v1.0.4
+        with:
+          fileName: key.jks
+          encodedString: ${{ secrets.KEY_JKS }}
+
+      - name: Create key.properties
+        run: |
+          echo "storeFile=${{ steps.android_keystore.outputs.filePath }}" > android/key.properties
+          echo "storePassword=${{ secrets.KEY_PASSWORD }}" >> android/key.properties
+          echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> android/key.properties
+          echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> android/key.properties
+
+      - name: Build Flutter app
+        run: flutter build apk
+
+      - name: Rename app
+        if: ${{ github.event_name != 'release' }}
+        run: mv build/app/outputs/apk/release/pstube-* build/app/outputs/apk/release/pstube-android-continuous.apk
+
+      - uses: svenstaro/upload-release-action@latest
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: build/app/outputs/apk/release/pstube-*
+          file_glob: true
+          prerelease: ${{ github.event_name != 'release' }}
+          release_name: ${{ github.event_name == 'release' && github.event.release.name || 'Development Build' }}
+          tag: ${{ github.event_name == 'release' && github.event.release.tag_name || 'continuous' }}
+          overwrite: true
+
+  build-linux:
+    name: Linux
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Setup flutter
+        uses: subosito/flutter-action@master
+        with:
+          channel: stable
+
+      - name: Install dependencies
+        run: sudo apt-get update -y && sudo apt-get install -y libfuse2 libvlc-dev ninja-build libgtk-3-dev dpkg-dev pkg-config rpm
+
+      - name: Enable desktop support
+        run: flutter config --enable-linux-desktop
+
+      - name: Build Flutter app
+        run: flutter build linux
+
+      - name: Bump versions
+        run: |
+          version=$(grep "^version" pubspec.yaml | awk '{print $2}')
+          sed -i "s:VERSION:$(echo $version):" linux/packaging/rpm/pstube.spec
+          sed -i "s:VERSION:$(echo $version):" linux/packaging/deb/DEBIAN/control
+ 
+      - name: Build RPM Package
+        run: |
+          cp -fr build/linux/x64/release/bundle linux/packaging/deb/usr/share/pstube
+          mkdir linux/packaging/deb/usr/bin
+          ln -sr linux/packaging/deb/usr/share/pstube/pstube linux/packaging/deb/usr/bin/pstube
+          sed -i "s:cp -rf :cp -rf $(pwd)/:" linux/packaging/rpm/pstube.spec
+          cd linux/packaging/deb
+          sed -i "s:FILES_HERE:$(find usr \( -type l -o -type f \) -follow -print | awk '{printf "/%s\\n", $0}'):" ../rpm/pstube.spec
+          cd ../../../
+          rpmbuild -bb linux/packaging/rpm/pstube.spec -D "_topdir $(pwd)/rpmbuild"
+          cp rpmbuild/RPMS/x86_64/*.rpm pstube-linux-${{ github.event_name == 'release' && github.event.release.tag_name || 'continuous' }}-x86_64.rpm
+          rm -rf linux/packaging/rpm
+
+      - name: Build DEB Package
+        run: |
+          dpkg-deb --build --root-owner-group linux/packaging/deb
+          cp linux/packaging/*.deb pstube-linux-${{ github.event_name == 'release' && github.event.release.tag_name || 'continuous' }}-x86_64.deb
+
+      - name: Build Tarball
+        run: |
+          mkdir -p AppDir/
+          cp -r linux/packaging/deb/usr AppDir/
+          ln -sr AppDir/usr/share/pstube/pstube AppDir/pstube
+          tar czf pstube-linux-${{ github.event_name == 'release' && github.event.release.tag_name || 'continuous' }}-x86_64.tar.gz -C AppDir/ .
+
+      - name: Build AppImage
+        run: |
+          echo '#!/bin/sh
+          cd "$(dirname "$0")"
+          exec ./pstube' > AppDir/AppRun
+          chmod +x AppDir/AppRun
+          ln -sr AppDir/usr/share/icons/hicolor/128x128/apps/pstube.png AppDir/pstube.png
+          cp AppDir/usr/share/applications/pstube.desktop AppDir/pstube.desktop
+          curl -L https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -o appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage AppDir/ pstube-linux-${{ github.event_name == 'release' && github.event.release.tag_name || 'continuous' }}-x86_64.AppImage
+
+      - uses: svenstaro/upload-release-action@latest
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: pstube-linux-*
+          file_glob: true
+          prerelease: ${{ github.event_name != 'release' }}
+          release_name: ${{ github.event_name == 'release' && github.event.release.name || 'Development Build' }}
+          tag: ${{ github.event_name == 'release' && github.event.release.tag_name || 'continuous' }}
+          overwrite: true
+
+  build_windows:
+    name: Windows
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Setup flutter
+        uses: subosito/flutter-action@master
+        with:
+          channel: stable
+
+      - name: Enable desktop support
+        run: flutter config --enable-windows-desktop
+
+      - name: Build Flutter app
+        run: flutter build windows
+
+      - run: cp -r build/windows/runner/Release pstube-windows-exe
+      - run: tar.exe -a -c -f pstube-windows-${{ github.event_name == 'release' && github.event.release.tag_name || 'continuous' }}.zip pstube-windows-exe
+
+      - run: |
+          "%programfiles(x86)%\Inno Setup 6\iscc.exe" "PsTube_InnoSetup.iss"
+        shell: cmd
+
+      - run: cp Output/* ./pstube-windows-${{ github.event_name == 'release' && github.event.release.tag_name || 'continuous' }}.exe
+
+      - uses: svenstaro/upload-release-action@latest
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: pstube-windows-*
+          file_glob: true
+          prerelease: ${{ github.event_name != 'release' }}
+          release_name: ${{ github.event_name == 'release' && github.event.release.name || 'Development Build' }}
+          tag: ${{ github.event_name == 'release' && github.event.release.tag_name || 'continuous' }}
+          overwrite: true
